@@ -1,0 +1,235 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "One Chat Query, File by File",
+    "output": ".archify/sequence-chat-query-file-flow-20261019-112240/chat-query-file-flow.html",
+    "viewBox": [
+      1000,
+      620
+    ],
+    "column_fit": "spread",
+    "quality_profile": "showcase"
+  },
+  "participants": [
+    {
+      "id": "ui",
+      "type": "frontend",
+      "label": "index.html",
+      "sublabel": "chat page"
+    },
+    {
+      "id": "relay",
+      "type": "backend",
+      "label": "relay.ts",
+      "sublabel": "agent-relay, session"
+    },
+    {
+      "id": "main",
+      "type": "backend",
+      "label": "main + turns",
+      "sublabel": "main.py, turns.py"
+    },
+    {
+      "id": "store",
+      "type": "database",
+      "label": "store.py",
+      "sublabel": "Postgres + Redis"
+    },
+    {
+      "id": "runner",
+      "type": "messagebus",
+      "label": "AgentRunner",
+      "sublabel": "Continuum"
+    },
+    {
+      "id": "llm",
+      "type": "cloud",
+      "label": "llm.py",
+      "sublabel": "Bedrock Claude"
+    },
+    {
+      "id": "tools",
+      "type": "backend",
+      "label": "tools.py",
+      "sublabel": "+ backend_client"
+    },
+    {
+      "id": "gql",
+      "type": "security",
+      "label": "resolvers.ts",
+      "sublabel": "withAuth"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 254,
+      "label": "Authenticate + open turn"
+    },
+    {
+      "from": 262,
+      "to": 450,
+      "label": "Continuum loop + tool call"
+    },
+    {
+      "from": 458,
+      "to": 506,
+      "label": "Persist + stream"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m1",
+      "from": "ui",
+      "to": "relay",
+      "y": 160,
+      "label": "POST /messages {turnId, text}",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m2",
+      "from": "relay",
+      "to": "main",
+      "y": 188,
+      "label": "forward + JWT + X-Internal-Auth",
+      "variant": "security"
+    },
+    {
+      "id": "m3",
+      "from": "main",
+      "to": "gql",
+      "y": 216,
+      "label": "validate_user: query me",
+      "variant": "security"
+    },
+    {
+      "id": "m5",
+      "from": "main",
+      "to": "store",
+      "y": 244,
+      "label": "begin_turn, lock, checkpoint"
+    },
+    {
+      "id": "m7",
+      "from": "main",
+      "to": "runner",
+      "y": 272,
+      "label": "turns.run_stream(session_id)"
+    },
+    {
+      "id": "m8",
+      "from": "runner",
+      "to": "llm",
+      "y": 300,
+      "label": "messages + tool schemas"
+    },
+    {
+      "id": "m9",
+      "from": "llm",
+      "to": "runner",
+      "y": 328,
+      "label": "tool_use: list_books",
+      "variant": "return"
+    },
+    {
+      "id": "m10",
+      "from": "runner",
+      "to": "tools",
+      "y": 356,
+      "label": "books__list_books(args)"
+    },
+    {
+      "id": "m11",
+      "from": "tools",
+      "to": "gql",
+      "y": 384,
+      "label": "listBooks (user JWT)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m12",
+      "from": "gql",
+      "to": "tools",
+      "y": 412,
+      "label": "books[]",
+      "variant": "return"
+    },
+    {
+      "id": "m14",
+      "from": "llm",
+      "to": "runner",
+      "y": 440,
+      "label": "answer after tool result",
+      "variant": "return"
+    },
+    {
+      "id": "m15",
+      "from": "main",
+      "to": "store",
+      "y": 468,
+      "label": "append_event(seq), checkpoint",
+      "variant": "dashed"
+    },
+    {
+      "id": "m16",
+      "from": "main",
+      "to": "ui",
+      "y": 496,
+      "label": "SSE frames, piped by relay",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "main",
+      "from": 188,
+      "to": 500,
+      "type": "backend"
+    },
+    {
+      "participant": "runner",
+      "from": 272,
+      "to": 444,
+      "type": "messagebus"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "books-backend (Node)",
+      "items": [
+        "public/index.html: sends turnId + text, reads the event stream",
+        "routes/agent-relay.ts: validateToken, adds secret, pipes stream",
+        "graphql/resolvers.ts: withAuth checks role on every call"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "books-agent (Python)",
+      "items": [
+        "main.py: checks secret, validates user via me, opens turn",
+        "turns.py: binds principal, runs Continuum, maps events to SSE",
+        "tools.py: fixed GraphQL docs sent with the user JWT"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Continuum + Bedrock",
+      "items": [
+        "agent_def.py: tools, approval gate, checkpoint injection",
+        "AgentRunner loops LLM, tool, LLM until an answer",
+        "llm.py: bedrock/ provider on the anthropic Bedrock client"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "State written",
+      "items": [
+        "store.py: turns row (turnId), events with seq, checkpoint v+1",
+        "Continuum Redis session: chat history",
+        "Writes stop at approval.py until the user confirms"
+      ]
+    }
+  ]
+}

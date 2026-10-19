@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "51216c90-de41-48ee-a41d-02d29b99a054",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "C:\\Users\\Dhananjay Ramesh\\Atlas\\agent-poc\\.archify\\sequence-chat-query-file-flow-20261019-112240\\candidate.json",
+  "output": "C:\\Users\\Dhananjay Ramesh\\Atlas\\agent-poc\\.archify\\sequence-chat-query-file-flow-20261019-112240\\chat-query-file-flow.html",
+  "specification": {
+    "sha256": "4bf00a4241298d80b8e0ca730bbf5385693712a78bf006b3a7108c38f336aefa",
+    "bytes": 5029
+  },
+  "artifact": {
+    "sha256": "bd0995d06e18f8757a52b32638d59ec8bd6ccce94033e8b1f745588f4f04c028",
+    "bytes": 762220
+  }
+}
