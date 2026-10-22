@@ -1,8 +1,8 @@
-# pre-commit hooks for agent-poc (books-backend + books-agent).
+# pre-commit hooks for agent-poc (books-backend + books-frontend + books-agent).
 #
-# Setup once per clone:   python -m pre_commit install
-# Run on everything:      python -m pre_commit run --all-files
-# Update hook versions:   python -m pre_commit autoupdate
+# Setup once per clone:   cd books-agent && uv run pre-commit install
+# Run on everything:      uv run --project books-agent pre-commit run --all-files
+# Update hook versions:   uv run --project books-agent pre-commit autoupdate
 #
 # Fixers (ruff --fix, ruff-format, prettier, whitespace) rewrite files and fail the commit;
 # `git add` the changes and commit again.
@@ -52,7 +52,7 @@ repos:
       - id: ruff-format
         files: ^books-agent/
 
-  # Local hooks: shell lint (needs `shellcheck` on PATH), books-backend format + typecheck
+  # Local hooks: shell lint (needs `shellcheck` on PATH), books-backend/books-frontend format + typecheck
   - repo: local
     hooks:
       - id: shellcheck
@@ -61,15 +61,21 @@ repos:
         language: system
         types: [shell]
       - id: prettier
-        name: prettier (books-backend)
+        name: prettier (books-backend, books-frontend)
         language: node
         entry: prettier --write --ignore-unknown
         additional_dependencies: ['prettier@3.3.3']
-        files: ^books-backend/.*\.(ts|js|json|html|md)$
-        exclude: ^books-backend/package-lock\.json$
+        files: ^books-(backend|frontend)/.*\.(ts|tsx|js|json|html|css|md)$
+        exclude: ^books-(backend|frontend)/package-lock\.json$
       - id: tsc
         name: tsc --noEmit (books-backend)
         language: system
         entry: npm --prefix books-backend run typecheck
         pass_filenames: false
         files: ^books-backend/.*\.ts$
+      - id: tsc-frontend
+        name: tsc --noEmit (books-frontend)
+        language: system
+        entry: npm --prefix books-frontend run typecheck
+        pass_filenames: false
+        files: ^books-frontend/.*\.(ts|tsx)$

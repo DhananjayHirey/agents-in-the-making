@@ -1,7 +1,8 @@
 """One chat turn, start to finish, as a stream of Server-Sent Events.
 
-Every event gets the next per-conversation `seq` and is written to Postgres BEFORE it is sent, so a
-client that drops can resume with GET /events?after=<last seq> and miss nothing.
+Every event gets the next per-conversation `seq` (the SSE event id) and is written to Postgres BEFORE it is
+published, so a client that drops can resume with GET + Last-Event-ID and miss nothing. The turn itself runs
+detached from any request (see `live`); `follow` is what a request streams back.
 
 Message turn:  turn_start -> user_message -> [tool_call_start/end, content_delta]* -> assistant_message
                -> [confirm_required]* -> turn_end
@@ -13,17 +14,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
-from typing import Any
+from typing import Any, cast
 
-from continuum.agent import AgentRunner, BaseAgent, EventType
+from continuum.agent import AgentEvent, AgentRunner, BaseAgent, EventType
 from continuum.session import bind_principal
 
-from app import store
-from app.context import TurnContext, current_turn
-from app.settings import settings
-from app.tools import IMPLEMENTATIONS
+from app.agents.context import TurnContext, current_turn
+from app.agents.tools import catalog
+from app.agents.workflows import live
+from app.config.settings import settings
+from app.modules.conversations import store
 
 
 def sse(seq: int, event_type: str, data: dict[str, Any]) -> str:
@@ -31,7 +33,7 @@ def sse(seq: int, event_type: str, data: dict[str, Any]) -> str:
 
 
 class EventLog:
-    """Assigns seq numbers and persists each event before it goes on the wire."""
+    """Assigns seq numbers, persists each event, then publishes it to live readers."""
 
     def __init__(self, conv_id: str, turn_id: str, start_seq: int):
         self.conv_id, self.turn_id, self.seq = conv_id, turn_id, start_seq
@@ -40,20 +42,40 @@ class EventLog:
         self.seq += 1
         payload = {"turnId": self.turn_id, **data}
         await store.append_event(self.conv_id, self.seq, self.turn_id, event_type, payload)
-        return sse(self.seq, event_type, payload)
+        frame = sse(self.seq, event_type, payload)
+        live.publish(self.conv_id, self.seq, frame)
+        return frame
 
 
 def heartbeat() -> str:
     return ": heartbeat\n\n"  # SSE comment: keeps proxies from closing an idle stream; not stored
 
 
-async def replay_turn(conv_id: str, turn_id: str) -> AsyncIterator[str]:
-    """A retried POST with a turnId that already finished: send the stored events, run nothing."""
-    for row in await store.events_after(conv_id, 0, turn_id=turn_id):
-        yield sse(row["seq"], row["type"], row["payload"])
+async def follow(conv_id: str, after: int, turn_id: str | None = None) -> AsyncIterator[str]:
+    """Stored events after `after`, then live ones until the running turn ends. With turn_id, only that turn.
+
+    Subscribing before reading Postgres closes the gap between the two: an event is stored before it is
+    published, so anything published before we subscribed is in the rows we read. Duplicates are dropped by seq.
+    """
+    queue = live.subscribe(conv_id, turn_id)
+    try:
+        last = after
+        for row in await store.events_after(conv_id, after, turn_id=turn_id):
+            last = row["seq"]
+            yield sse(row["seq"], row["type"], row["payload"])
+        if queue is None:
+            return  # nothing running: the replay is everything
+        while (item := await queue.get()) is not None:
+            seq, frame = item
+            if seq > last:
+                last = seq
+                yield frame
+    finally:
+        if queue is not None:
+            live.unsubscribe(conv_id, queue)
 
 
-async def _merge_with_heartbeats(source: AsyncIterator[str]) -> AsyncIterator[str]:
+async def with_heartbeats(source: AsyncIterator[str]) -> AsyncIterator[str]:
     """Yields from `source`, inserting a heartbeat whenever it is quiet for heartbeat_seconds."""
     queue: asyncio.Queue[str | None | BaseException] = asyncio.Queue()
 
@@ -114,16 +136,22 @@ async def message_turn(runner: AgentRunner, agent: BaseAgent, ctx: TurnContext, 
             with bind_principal(str(ctx.user.id)):
                 # The runner does not create sessions. get_or_create_session is deterministic for
                 # (user, conversation), so every turn of this conversation lands on the same Redis history.
+                if runner.session_client is None:
+                    raise RuntimeError("Continuum sessions are not configured (is Redis set up?)")
                 session_id = await runner.session_client.get_or_create_session(
                     user_id=str(ctx.user.id), conversation_id=ctx.conversation_id
                 )
-                stream = runner.run_stream(
-                    agent,
-                    text,
-                    session_id=session_id,  # Continuum's Redis chat history
-                    user_id=str(ctx.user.id),
-                    max_turns=settings.max_tool_turns,
-                    metadata={"turnId": ctx.turn_id, "conversationId": ctx.conversation_id},
+                # run_stream is an async generator but is annotated AsyncIterator; aclosing needs aclose().
+                stream = cast(
+                    AsyncGenerator[AgentEvent],
+                    runner.run_stream(
+                        agent,
+                        text,
+                        session_id=session_id,  # Continuum's Redis chat history
+                        user_id=str(ctx.user.id),
+                        max_turns=settings.max_tool_turns,
+                        metadata={"turnId": ctx.turn_id, "conversationId": ctx.conversation_id},
+                    ),
                 )
                 async with aclosing(stream) as events:
                     async for ev in events:
@@ -150,7 +178,7 @@ async def message_turn(runner: AgentRunner, agent: BaseAgent, ctx: TurnContext, 
                             final_text = data.get("content") or ""
 
         async with asyncio.timeout(settings.turn_timeout_seconds):
-            async for frame in _merge_with_heartbeats(run()):
+            async for frame in run():
                 yield frame
 
         reply = final_text or streamed
@@ -208,7 +236,7 @@ async def confirm_turn(ctx: TurnContext, action_id: str, decision: str) -> Async
             yield await log.emit("tool_call_start", {"tool": tool, "arguments": args})
             # Executed as the CONFIRMING request's user, with their current token: if their access
             # changed since the proposal, the backend's withAuth refuses it here.
-            result = await IMPLEMENTATIONS[tool](args)
+            result = await catalog.current().run(tool, args)
             yield await log.emit("tool_call_end", {"tool": tool, "result": result})
             ok = bool(result.get("ok"))
             await store.finish_pending_action(action_id, "executed" if ok else "failed", result)

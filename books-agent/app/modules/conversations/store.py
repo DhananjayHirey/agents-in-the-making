@@ -22,7 +22,7 @@ from urllib.parse import urlparse, urlunparse
 import asyncpg
 import redis.asyncio as aioredis
 
-from app.settings import settings
+from app.config.settings import settings
 
 pool: asyncpg.Pool
 redis: aioredis.Redis
@@ -207,8 +207,10 @@ async def append_event(conv_id: str, seq: int, turn_id: str, event_type: str, pa
 async def events_after(conv_id: str, after: int, turn_id: str | None = None) -> list[asyncpg.Record]:
     if turn_id:
         return await pool.fetch(
-            "SELECT seq, type, payload FROM agent.events WHERE conversation_id = $1 AND turn_id = $2 ORDER BY seq",
+            """SELECT seq, type, payload FROM agent.events
+               WHERE conversation_id = $1 AND seq > $2 AND turn_id = $3 ORDER BY seq""",
             uuid.UUID(conv_id),
+            after,
             turn_id,
         )
     return await pool.fetch(

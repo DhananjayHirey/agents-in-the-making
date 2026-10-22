@@ -11,17 +11,19 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import anthropic
+# Not `anthropic.AnthropicBedrock`: the package's __all__ leaves the Bedrock clients out, so type checkers
+# (Pylance/pyright) report them as not exported. anthropic.lib.bedrock re-exports them explicitly.
+from anthropic.lib.bedrock import AnthropicBedrock, AsyncAnthropicBedrock
 from continuum.llm.providers import register_provider
 from continuum.llm.providers.anthropic_provider import AnthropicProvider
 
-from app.settings import settings
+from app.config.settings import settings
 
 
 class BedrockClaudeProvider(AnthropicProvider):
     def __init__(self, region: str, profile: str | None = None):  # not calling super(): it would build api-key clients
-        self._client = anthropic.AnthropicBedrock(aws_region=region, aws_profile=profile)
-        self._async_client = anthropic.AsyncAnthropicBedrock(aws_region=region, aws_profile=profile)
+        self._client = AnthropicBedrock(aws_region=region, aws_profile=profile)
+        self._async_client = AsyncAnthropicBedrock(aws_region=region, aws_profile=profile)
 
     def _normalize_model(self, model: str) -> str:
         return model.removeprefix("bedrock/")

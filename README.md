@@ -1,11 +1,12 @@
-# Agent POC — books-backend ⇄ books-agent (Continuum + Claude on Bedrock)
+# Agent POC — books-frontend → books-backend ⇄ books-agent (Continuum + Claude on Bedrock)
 
 A miniature of the CMS-agent design, small enough to read in one sitting:
 
 - **books-backend** (Node, TypeScript): stands in for the CMS backend.
   - Users live in Postgres and books in Mongo.
   - A GraphQL API offers `getBook`, `listBooks`, `setBook` and `deleteBook`, guarded by `withAuth` and roles.
-  - It has a login route, an **agent relay**, and a demo chat page.
+  - It has a login route and an **agent relay**.
+- **books-frontend** (Vite, React, TypeScript): the demo chat UI. It talks only to the backend (`/auth`, `/api/agent`).
 - **books-agent** (Python 3.13, FastAPI, Continuum): stands in for `atlas-agent`.
   - It receives chat turns from the relay only, and runs a Continuum agent whose tools call the backend's GraphQL as the signed-in user.
   - Writes wait for the user's confirm.
@@ -13,25 +14,39 @@ A miniature of the CMS-agent design, small enough to read in one sitting:
   - It keeps short-term chat history in Continuum's Redis session.
 
 ```
-browser / CLI ──POST /api/agent/conversations/:id/messages──▶ books-backend relay
+browser / CLI ──POST /api/agent/conversations/:id {kind:'message'}──▶ books-backend relay
                                                               │ validateToken (same as GraphQL)
                                                               │ + turnId, X-Internal-Auth, user's token
                                                               ▼
-                                                      books-agent  /v1/conversations/:id/messages
+                                                      books-agent  POST /v1/conversations/:id
                                                               │ check secret, validate user via `me`
                                                               │ idempotency (turnId), lock, load checkpoint
+                                                              │ turn runs as a background task (survives disconnects)
                                                               │ Continuum AgentRunner.run_stream
                                                               │   ├─ Claude (Bedrock)  ◀─▶ tool calls
                                                               │   └─ tools ──POST /graphql (user's token)──▶ books-backend
                                                               │ writes → approval_handler → pending action (deferred)
+                                                              │ tool list ◀──GET /internal/agent-tools (polled, ETag)── books-backend
                                                               ▼
-                     text/event-stream (seq-numbered events, piped back through the relay)
-browser ──POST …/confirm {actionId}──▶ relay ──▶ agent executes the stored mutation (no LLM) ──▶ backend
+                     text/event-stream (events with id = seq, piped back through the relay)
+browser ──POST …/:id {kind:'confirm', actionId}──▶ relay ──▶ agent executes the stored mutation (no LLM) ──▶ backend
+browser ──GET  …/:id  Last-Event-ID: N──▶ relay ──▶ agent replays events after N, then follows the running turn live
 ```
+
+The conversation endpoint uses MCP-style **Streamable HTTP**: one URL per conversation, `POST` sends a turn and
+streams it back, `GET` with `Last-Event-ID` resumes. Clients send `Accept: application/json, text/event-stream`.
+A dropped connection does not cancel the turn; the web page and the CLI resume automatically.
+
+**The backend owns the agent's tools.** `books-backend/src/agent/tools.ts` lists every tool: name, description,
+input schema, `read` or `write`, and the one fixed GraphQL document it runs with the user's token. Write tools
+also build their own confirm card (`preview`). The agent loads the list from `GET /internal/agent-tools` at
+startup and re-checks it every `TOOL_REFRESH_SECONDS` (30 by default; `If-None-Match`, so unchanged lists cost a
+304). When the list changes, the agent is rebuilt with it; turns already running finish on the old tools. To add
+or change a tool, edit `tools.ts` and restart the backend — the agent needs no change.
 
 ## Run it
 
-Prerequisites: Postgres, Mongo and Redis running locally (6379); Node 20+; Python 3.13; AWS credentials with
+Prerequisites: Postgres, Mongo and Redis running locally (6379); Node 20+; [uv](https://docs.astral.sh/uv/) (installs Python 3.13 for you); AWS credentials with
 Bedrock access to the Claude model in `BEDROCK_MODEL_ID`.
 
 **1. Backend**
@@ -48,17 +63,25 @@ npm start                   # http://localhost:4000 — creates books_poc DB, se
 ```bash
 cd books-agent
 cp .env.example .env        # fill AGENT_DATABASE_URL, the SAME INTERNAL_AUTH_SECRET, AWS_REGION, AWS_PROFILE
-py -3.13 -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-.venv\Scripts\python -m app.main      # http://localhost:8001 — creates agent_poc DB + agent schema
+uv sync                     # creates .venv with Python 3.13 and installs deps from uv.lock
+uv run python -m app.main   # http://localhost:8001 — creates agent_poc DB + agent schema
 ```
 
-**3. Chat**
+**3. Frontend**
 
-- **Browser:** open http://localhost:4000, pick a user and sign in (passwords are in `books-backend/src/db/seed-users.ts`).
+```bash
+cd books-frontend
+npm install
+npm run dev                 # http://localhost:5173 — proxies /auth and /api to the backend on :4000
+```
+
+**4. Chat**
+
+- **Browser:** open http://localhost:5173, pick a user and sign in (passwords are in `books-backend/src/db/seed-users.ts`).
 - **Terminal:**
 
   ```bash
+  cd books-backend
   npm run chat -- --user editor@books.local --password <from seed-users.ts>
   ```
 
@@ -79,14 +102,16 @@ Things to try:
 |---|---|
 | User validation (backend) | `books-backend/src/auth/session.ts` → `validateToken`, used by GraphQL `withAuth` and by the relay |
 | Relay: auth, turnId, internal secret, unbuffered pipe | `books-backend/src/routes/agent-relay.ts` |
-| User validation (agent): secret, then backend `me`, cached | `books-agent/app/main.py` → `principal`, `app/backend_client.py` → `validate_user` |
-| turnId idempotency + one turn at a time | `app/store.py` → `begin_turn`, `acquire_lock`; `app/main.py` → `_start_turn` |
-| Streamable HTTP events with seq + resume | `app/turns.py` → `EventLog`, `GET /events?after=` |
+| User validation (agent): secret, then backend `me`, cached | `books-agent/app/modules/conversations/routes.py` → `principal`, `app/utils/backend_client.py` → `validate_user` |
+| turnId idempotency + one turn at a time | `app/modules/conversations/store.py` → `begin_turn`, `acquire_lock`; `app/modules/conversations/routes.py` → `_start_turn` |
+| Streamable HTTP: one endpoint, events with seq ids, resume via `Last-Event-ID` | `app/modules/conversations/routes.py` → `post_turn`, `resume`; `app/agents/workflows/turns.py` → `EventLog`, `follow` |
+| Turns survive client disconnects | `app/agents/workflows/live.py` (background task + in-process fan-out; Redis pub/sub with several replicas) |
 | Chat history (short-term) | Continuum session (Redis) via `run_stream(session_id=conversation_id)` + `bind_principal` |
-| Checkpoints + transcript (durable) | `app/store.py` (`agent.checkpoints`, `agent.events`); injected each model call by `agent_def.inject_turn_context` |
-| Tools calling the backend as the user | `app/tools.py` (fixed GraphQL docs, token from contextvar) |
-| Write gate | `AgentConfig.tool_approval` + `app/approval.py` (deferred) → `turns.confirm_turn` |
-| Bedrock / gateway switch | `app/llm.py` (`LLM_BACKEND`) |
+| Checkpoints + transcript (durable) | `app/modules/conversations/store.py` (`agent.checkpoints`, `agent.events`); injected each model call by `agents/definitions/books_agent.inject_turn_context` |
+| Tool list owned by the backend | `books-backend/src/agent/tools.ts` → `AGENT_TOOLS`; served by `src/routes/agent-tools.ts` |
+| Tools calling the backend as the user | `app/agents/tools/catalog.py` (backend's fixed GraphQL docs, token from contextvar); refreshed by `app/main.py` → `keep_tools_fresh` |
+| Write gate | `AgentConfig.tool_approval` (the backend's `write` tools) + `app/agents/middleware/approval.py` (deferred; preview from the backend) → `turns.confirm_turn` |
+| Bedrock / gateway switch | `app/config/llm.py` (`LLM_BACKEND`) |
 
 ## Gotchas found while building
 

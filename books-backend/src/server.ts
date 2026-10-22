@@ -1,7 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
 import { config } from './config.js';
@@ -11,8 +9,7 @@ import { typeDefs } from './graphql/schema.js';
 import { resolvers, type GqlContext } from './graphql/resolvers.js';
 import { authRouter } from './routes/auth.js';
 import { agentRelay } from './routes/agent-relay.js';
-
-const here = path.dirname(fileURLToPath(import.meta.url));
+import { agentToolsRouter } from './routes/agent-tools.js';
 
 async function main() {
   await initPostgres();
@@ -34,10 +31,10 @@ async function main() {
 
   app.use('/auth', authRouter);
   app.use('/api/agent', agentRelay);
-  app.use(express.static(path.join(here, '..', 'public'))); // the demo chat page
+  app.use('/internal/agent-tools', agentToolsRouter); // agent service only (shared secret)
 
   app.listen(config.port, () => {
-    console.log(`books-backend on http://localhost:${config.port}  (chat page at /, GraphQL at /graphql)`);
+    console.log(`books-backend on http://localhost:${config.port}  (GraphQL at /graphql; chat UI is books-frontend)`);
   });
 }
 

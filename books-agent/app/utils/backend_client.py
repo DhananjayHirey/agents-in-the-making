@@ -1,4 +1,5 @@
-"""Talks to books-backend exactly like the frontend does: POST /graphql with the user's raw token."""
+"""Talks to books-backend: GraphQL exactly like the frontend does (the user's raw token), plus the internal
+tool API (shared secret) that publishes the agent's tools and builds confirm-card previews."""
 
 from __future__ import annotations
 
@@ -9,8 +10,8 @@ from typing import Any
 import httpx
 import redis.asyncio as aioredis
 
-from app.context import User
-from app.settings import settings
+from app.agents.context import User
+from app.config.settings import settings
 
 _http = httpx.AsyncClient(timeout=20.0)
 _redis: aioredis.Redis | None = None
@@ -40,6 +41,29 @@ async def gql(query: str, variables: dict[str, Any] | None, token: str) -> dict[
         err = body["errors"][0]
         raise BackendError(err.get("message", "Backend error"), (err.get("extensions") or {}).get("code"))
     return body["data"]
+
+
+async def fetch_tool_manifest(known_version: str | None) -> dict[str, Any] | None:
+    """The backend's tool manifest {version, tools}, or None when it is still `known_version` (304)."""
+    headers = {"x-internal-auth": settings.internal_auth_secret}
+    if known_version:
+        headers["if-none-match"] = f'"{known_version}"'
+    resp = await _http.get(settings.backend_tools_url, headers=headers)
+    if resp.status_code == 304:
+        return None
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def preview(tool: str, args: dict[str, Any], token: str) -> dict[str, Any]:
+    """The confirm card for a write ({summary, before, after}), built by the backend as the user."""
+    resp = await _http.post(
+        f"{settings.backend_tools_url}/{tool}/preview",
+        json={"args": args},
+        headers={"authorization": token, "x-internal-auth": settings.internal_auth_secret},
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 ME = "query Me { me { id email name role } }"

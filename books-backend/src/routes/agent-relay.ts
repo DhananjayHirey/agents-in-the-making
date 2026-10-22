@@ -12,6 +12,10 @@ import { AuthError, validateToken, type SessionUser } from '../auth/session.js';
  *   2. assigns a turnId when the client did not send one (so a retried POST is recognisable)
  *   3. forwards to the agent with the user's raw token + an internal secret only the relay knows
  *   4. pipes the agent's response back byte-for-byte (streams are not buffered)
+ *
+ * The conversation endpoint is Streamable HTTP (MCP-style): POST /conversations/:id sends a turn and streams it,
+ * GET /conversations/:id with Last-Event-ID resumes. Accept and Last-Event-ID are passed through untouched.
+ * A browser that goes away only detaches its reader; the agent finishes the turn and the client can resume.
  */
 export const agentRelay = Router();
 
@@ -28,12 +32,15 @@ async function authenticate(req: Request, res: Response): Promise<SessionUser | 
 function agentHeaders(req: Request, user: SessionUser, turnId?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'content-type': 'application/json',
+    accept: req.header('accept') ?? 'application/json',
     authorization: req.header('authorization')!, // the user's own token; the agent uses it for every backend call
     'x-internal-auth': config.internalAuthSecret, // proves the call came through this relay
     'x-user-id': String(user.id), // a hint; the agent re-validates the token itself
     'x-request-id': req.header('x-request-id') ?? randomUUID(),
   };
   if (turnId) headers['x-turn-id'] = turnId;
+  const lastEventId = req.header('last-event-id');
+  if (lastEventId) headers['last-event-id'] = lastEventId;
   return headers;
 }
 
@@ -86,34 +93,21 @@ agentRelay.post('/conversations', (req, res) => forward(req, res, 'POST', '/v1/c
 // The user's own conversations.
 agentRelay.get('/conversations', (req, res) => forward(req, res, 'GET', '/v1/conversations'));
 
-// Send a chat message. Response is a text/event-stream that stays open for the whole turn.
-agentRelay.post('/conversations/:id/messages', (req, res) => {
+// Send a turn: {kind: 'message', text} or {kind: 'confirm', actionId, decision}. Response is a text/event-stream
+// that stays open for the whole turn.
+agentRelay.post('/conversations/:id', (req, res) => {
   const turnId = (req.body?.turnId as string | undefined) ?? `t_${randomUUID()}`;
   return forward(
     req,
     res,
     'POST',
-    `/v1/conversations/${encodeURIComponent(req.params.id)}/messages`,
+    `/v1/conversations/${encodeURIComponent(req.params.id)}`,
     { ...req.body, turnId },
     turnId,
   );
 });
 
-// Confirm or reject a write the agent proposed. Also a streamed turn.
-agentRelay.post('/conversations/:id/confirm', (req, res) => {
-  const turnId = (req.body?.turnId as string | undefined) ?? `t_${randomUUID()}`;
-  return forward(
-    req,
-    res,
-    'POST',
-    `/v1/conversations/${encodeURIComponent(req.params.id)}/confirm`,
-    { ...req.body, turnId },
-    turnId,
-  );
-});
-
-// Replay / resume: every stored event after `after` (the last seq the client saw).
-agentRelay.get('/conversations/:id/events', (req, res) => {
-  const after = encodeURIComponent(String(req.query.after ?? '0'));
-  return forward(req, res, 'GET', `/v1/conversations/${encodeURIComponent(req.params.id)}/events?after=${after}`);
-});
+// Resume: every stored event after Last-Event-ID, then live ones while a turn is running.
+agentRelay.get('/conversations/:id', (req, res) =>
+  forward(req, res, 'GET', `/v1/conversations/${encodeURIComponent(req.params.id)}`),
+);

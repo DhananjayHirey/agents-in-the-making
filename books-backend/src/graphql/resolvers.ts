@@ -34,7 +34,7 @@ function withAuth<A>(resolver: Resolver<A>, allowed: Role[]) {
 
 const ANY: Role[] = ['viewer', 'editor', 'admin'];
 
-function toGql(doc: BookDoc) {
+export function toGql(doc: BookDoc) {
   return { ...doc, id: doc._id, updatedAt: doc.updatedAt.toISOString() };
 }
 

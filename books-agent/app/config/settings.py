@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     agent_port: int = 8001
     internal_auth_secret: str
     backend_graphql_url: str = "http://localhost:4000/graphql"
+    # The backend publishes the agent's tools here (GET), plus confirm-card previews (POST /{tool}/preview).
+    backend_tools_url: str = "http://localhost:4000/internal/agent-tools"
+    tool_refresh_seconds: float = 30.0
     agent_database_url: str
     redis_url: str = "redis://localhost:6379/0"
 

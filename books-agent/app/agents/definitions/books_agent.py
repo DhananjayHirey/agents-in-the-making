@@ -9,22 +9,10 @@ from continuum.agent.config import AgentMemoryConfig
 from continuum.tools import ToolExecutor
 from continuum.tools.mcp import MCPServerFunction
 
-from app.approval import approval_handler
-from app.context import current_turn
-from app.tools import TOOLS
-
-SYSTEM_PROMPT = """You are the Books assistant inside an admin app. You help the signed-in user look at and manage
-the book catalogue by calling tools. You act on the user's behalf with exactly their access.
-
-Rules:
-- Use tools for every fact about books. Never invent ids, titles or values.
-- Before changing or deleting a book, find it first (list_books or get_book) so you use its real id and
-  current values. If more than one book could match, ask which one and list the options.
-- set_book and delete_book need the user's confirmation. When a call comes back "awaiting approval",
-  tell the user briefly what will change and that they need to press Confirm. Do not claim it is done.
-- If a tool returns ok=false with code FORBIDDEN, explain that their role is not allowed to do that.
-- Keep answers short. Use the book title when talking to the user, the id when calling tools.
-"""
+from app.agents.context import current_turn
+from app.agents.middleware.approval import make_approval_handler
+from app.agents.prompts.books import SYSTEM_PROMPT
+from app.agents.tools.catalog import ToolCatalog
 
 
 def inject_turn_context(instructions: str, _run_ctx) -> str:
@@ -53,10 +41,11 @@ def inject_turn_context(instructions: str, _run_ctx) -> str:
     return instructions + "\n".join(lines)
 
 
-async def build_agent(model: str, max_tool_turns: int) -> BaseAgent:
+async def build_agent(model: str, max_tool_turns: int, tools: ToolCatalog) -> BaseAgent:
+    """Builds the agent around the backend's current tool list. Rebuilt whenever that list changes."""
     # Our tools run in-process as an MCP "function server". Continuum 2.1 executes MCP tools only
     # through an explicit ToolExecutor; the model sees them namespaced as "books__<tool>".
-    books_server = MCPServerFunction("books", TOOLS)
+    books_server = MCPServerFunction("books", tools.function_tools())
     executor = ToolExecutor(tool_registry={books_server: None})
     await executor.initialize()
     return BaseAgent(
@@ -72,8 +61,9 @@ async def build_agent(model: str, max_tool_turns: int) -> BaseAgent:
         memory_config=AgentMemoryConfig(search_memories=False, store_memories=False),
         config=AgentConfig(
             max_turns=max_tool_turns,
-            # fnmatch patterns: match the namespaced 'books__set_book' and a bare 'set_book' alike.
-            tool_approval={"*set_book", "*delete_book"},
-            approval_handler=approval_handler,
+            # The backend marks which tools write. fnmatch patterns: the namespaced 'books__set_book' and a bare
+            # 'set_book' alike (but not 'reset_book').
+            tool_approval={p for name in tools.write_tools for p in (name, f"*__{name}")},
+            approval_handler=make_approval_handler(tools),
         ),
     )
